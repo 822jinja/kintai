@@ -634,10 +634,11 @@ function init() {
 function loadConfig() {
   const saved = localStorage.getItem("kintai_config");
   if (saved) {
-    config = JSON.parse(saved);
+    const parsed = JSON.parse(saved);
+    config.gasUrl = parsed.gasUrl || "";
+    config.staffList = [...DEFAULT_STAFF];
   }
 }
-
 function saveConfig() {
   localStorage.setItem("kintai_config", JSON.stringify(config));
 }
