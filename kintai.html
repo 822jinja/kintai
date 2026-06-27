@@ -706,7 +706,22 @@ async function punch(type) {
     showToast("⚠ GAS URLが設定されていません");
     return;
   }
+// 警告チェック（当日ログベース）
+  const lastLog = [...todayLogs].reverse().find(l => l.name === selectedStaff);
+  const lastType = lastLog ? lastLog.type : null;
 
+  if (type === "出勤" && lastType === "出勤") {
+    if (!confirm(`⚠ ${selectedStaff}はすでに出勤済みです。続けて打刻しますか？`)) return;
+  }
+  if (type === "退勤" && !lastType) {
+    if (!confirm(`⚠ ${selectedStaff}の出勤記録がありません。続けて打刻しますか？`)) return;
+  }
+  if (type === "外出" && !lastType) {
+    if (!confirm(`⚠ ${selectedStaff}の出勤記録がありません。続けて打刻しますか？`)) return;
+  }
+  if (type === "戻り" && lastType !== "外出") {
+    if (!confirm(`⚠ ${selectedStaff}の外出記録がありません。続けて打刻しますか？`)) return;
+  }
   const name = selectedStaff;
   const now = new Date();
   const timeStr = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
