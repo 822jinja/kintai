@@ -617,18 +617,18 @@ const DEFAULT_STAFF = [
 ];
 
 // ===== 状態 =====
-let config = {
-  gasUrl: "",
-  staffList: [...DEFAULT_STAFF]
-};
+let config = { gasUrl: "", staffList: [...DEFAULT_STAFF] };
 let selectedStaff = null;
 let todayLogs = [];
+let isSubmitting = false;
 
 // ===== 初期化 =====
 function init() {
   loadConfig();
+  loadTodayLogs();   // ★ ローカルストレージから復元
   renderStaff();
   startClock();
+  renderAllLogs();   // ★ 起動時にログ一覧を表示
 }
 
 function loadConfig() {
@@ -636,11 +636,34 @@ function loadConfig() {
   if (saved) {
     const parsed = JSON.parse(saved);
     config.gasUrl = parsed.gasUrl || "";
-    config.staffList = [...DEFAULT_STAFF];
+    config.staffList = parsed.staffList || [...DEFAULT_STAFF];
   }
 }
+
 function saveConfig() {
   localStorage.setItem("kintai_config", JSON.stringify(config));
+}
+
+// ===== 当日ログの保存・復元 =====
+function saveTodayLogs() {
+  const today = new Date().toDateString();
+  localStorage.setItem("kintai_logs", JSON.stringify({ date: today, logs: todayLogs }));
+}
+
+function loadTodayLogs() {
+  const saved = localStorage.getItem("kintai_logs");
+  if (!saved) return;
+  try {
+    const { date, logs } = JSON.parse(saved);
+    // 今日のログだけ復元（日付が変わったらリセット）
+    if (date === new Date().toDateString()) {
+      todayLogs = logs || [];
+    } else {
+      localStorage.removeItem("kintai_logs");
+    }
+  } catch (e) {
+    localStorage.removeItem("kintai_logs");
+  }
 }
 
 // ===== 時計 =====
@@ -652,11 +675,8 @@ function startClock() {
     const m = String(now.getMinutes()).padStart(2,"0");
     const s = String(now.getSeconds()).padStart(2,"0");
     document.getElementById("clockTime").textContent = `${h}:${m}:${s}`;
-    const y = now.getFullYear();
-    const mo = now.getMonth()+1;
-    const d = now.getDate();
-    const day = DAYS[now.getDay()];
-    document.getElementById("clockDate").textContent = `${y}年${mo}月${d}日（${day}）`;
+    const y = now.getFullYear(), mo = now.getMonth()+1, d = now.getDate();
+    document.getElementById("clockDate").textContent = `${y}年${mo}月${d}日（${DAYS[now.getDay()]}）`;
   }
   update();
   setInterval(update, 1000);
@@ -670,7 +690,9 @@ function renderStaff() {
     if (!name.trim()) return;
     const lastLog = [...todayLogs].reverse().find(l => l.name === name);
     const statusText = lastLog ? `最終：${lastLog.type} ${lastLog.time}` : "未打刻";
-    const statusClass = lastLog ? (lastLog.type === "出勤" ? "in" : lastLog.type === "退勤" ? "out" : lastLog.type === "外出" ? "away" : "back") : "";
+    const statusClass = lastLog
+      ? (lastLog.type === "出勤" ? "in" : lastLog.type === "退勤" ? "out" : lastLog.type === "外出" ? "away" : "back")
+      : "";
     const initial = name.trim()[0];
     const btn = document.createElement("button");
     btn.className = "staff-btn" + (selectedStaff === name ? " selected" : "");
@@ -700,13 +722,16 @@ function cancelSelection() {
 }
 
 // ===== 打刻 =====
-async function punch(type) {
+function punch(type) {
   if (!selectedStaff) return;
+  if (isSubmitting) return; // ★ 二重送信防止
+
   if (!config.gasUrl) {
     showToast("⚠ GAS URLが設定されていません");
     return;
   }
-// 警告チェック（当日ログベース）
+
+  // 警告チェック
   const lastLog = [...todayLogs].reverse().find(l => l.name === selectedStaff);
   const lastType = lastLog ? lastLog.type : null;
 
@@ -722,42 +747,59 @@ async function punch(type) {
   if (type === "戻り" && lastType !== "外出") {
     if (!confirm(`⚠ ${selectedStaff}の外出記録がありません。続けて打刻しますか？`)) return;
   }
+
   const name = selectedStaff;
   const now = new Date();
   const timeStr = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
 
-  // 送信中表示
-  document.getElementById("sendingOverlay").classList.add("active");
+  // ★ 即時UI更新（レスポンスを待たない）
+  isSubmitting = true;
+  todayLogs.push({ name, type, time: timeStr });
+  saveTodayLogs();
+  cancelSelection();
+  addLogItem(name, type, timeStr);
+  showToast(`✓ ${name}　${type}を記録しました`);
 
-  try {
-    await fetch(config.gasUrl, {
-      method: "POST",
-      mode: "no-cors",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, type, timestamp: now.toISOString() })
-    });
+  // ★ fire & forget（バックグラウンドで送信）
+  fetch(config.gasUrl, {
+    method: "POST",
+    mode: "no-cors",
+    keepalive: true,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, type, timestamp: now.toISOString() })
+  }).catch(() => {
+    // no-corsではエラー判定不可のため無視
+  });
 
-    // ローカルログ追加
-    todayLogs.push({ name, type, time: timeStr });
-
-    cancelSelection();
-    addLogItem(name, type, timeStr);
-    showToast(`✓ ${name}　${type}を記録しました`);
-
-  } catch (err) {
-    showToast("⚠ 送信に失敗しました。ネットワークを確認してください");
-  } finally {
-    document.getElementById("sendingOverlay").classList.remove("active");
-  }
+  // 3秒後に再送信可能に（連打防止）
+  setTimeout(() => { isSubmitting = false; }, 3000);
 }
 
 // ===== ログ表示 =====
+function renderAllLogs() {
+  const list = document.getElementById("logList");
+  list.innerHTML = "";
+  if (todayLogs.length === 0) {
+    list.innerHTML = '<div class="log-item" style="color:#bbb;font-size:12px;justify-content:center;">まだ打刻がありません</div>';
+    return;
+  }
+  // 新しい順に表示
+  [...todayLogs].reverse().forEach(({ name, type, time }) => {
+    const item = createLogItem(name, type, time);
+    list.appendChild(item);
+  });
+}
+
 function addLogItem(name, type, time) {
   const list = document.getElementById("logList");
-  // 初期メッセージ削除
   const empty = list.querySelector("[style]");
   if (empty) empty.remove();
+  const item = createLogItem(name, type, time);
+  list.insertBefore(item, list.firstChild);
+  renderStaff();
+}
 
+function createLogItem(name, type, time) {
   const item = document.createElement("div");
   item.className = "log-item";
   const badgeClass = type === "出勤" ? "in" : type === "退勤" ? "out" : type === "外出" ? "away" : "back";
@@ -766,9 +808,7 @@ function addLogItem(name, type, time) {
     <span class="log-name">${name}</span>
     <span class="log-time">${time}</span>
   `;
-  list.insertBefore(item, list.firstChild);
-
-  renderStaff();
+  return item;
 }
 
 // ===== トースト =====
@@ -793,9 +833,7 @@ function closeSettings() {
 function saveSettings() {
   config.gasUrl = document.getElementById("gasUrl").value.trim();
   config.staffList = document.getElementById("staffNames").value
-    .split("\n")
-    .map(s => s.trim())
-    .filter(Boolean);
+    .split("\n").map(s => s.trim()).filter(Boolean);
   saveConfig();
   closeSettings();
   renderStaff();
